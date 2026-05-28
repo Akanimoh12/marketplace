@@ -4,7 +4,7 @@
 
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Image from "next/image";
 import {
@@ -17,6 +17,7 @@ import {
     AuctionStatus
 } from "@/lib/contract";
 import { fetchMetadata, cidToGatewayUrl, ArtworkMetadata } from "@/lib/ipfs";
+import { getReadableErrorMessage } from "@/lib/errors";
 import { useWalletContext } from "@/context/WalletContext";
 import { useBuyArtwork, usePlaceBid } from "@/hooks/useMarketplace";
 import { useListingOffers } from "@/hooks/useOffers";
@@ -39,6 +40,7 @@ import {
     TrendingUp,
     Landmark,
     Share2,
+    RefreshCw,
 } from "lucide-react";
 
 export default function ListingDetailPage() {
@@ -60,12 +62,49 @@ export default function ListingDetailPage() {
     const { offers, isLoading: isLoadingOffers, refresh: refreshOffers } = useListingOffers(id ? Number(id) : null);
     const { activities, isLoading: isLoadingActivity } = useListingActivity(id ? Number(id) : null);
 
-    useEffect(() => {
-        const loadData = async () => {
-            if (!id) return;
-            setIsLoading(true);
-            setError(null);
-            try {
+    const loadData = useCallback(async () => {
+        if (!id) return;
+        setIsLoading(true);
+        setError(null);
+        try {
+                // Mock data fallback for placeholder IDs (1-6)
+                if (Number(id) >= 1 && Number(id) <= 6) {
+                    const mockIdx = Number(id) - 1;
+                    const mocks = [
+                        { title: "Ndebele Geometry", artist: "GB2...Traditional", category: "Traditional", price: 250, image: "https://images.unsplash.com/photo-1582582621959-48d27397dc69?w=800&q=80" },
+                        { title: "Maasai Beadwork Essence", artist: "GB3...Contemporary", category: "Contemporary", price: 180, image: "https://images.unsplash.com/photo-1590845947698-8924d7409b56?w=800&q=80" },
+                        { title: "Bronze Kingdom Legacy", artist: "GB4...Classical", category: "Classical", price: 420, image: "https://images.unsplash.com/photo-1580136579312-94651dfd596d?w=800&q=80" },
+                        { title: "Sahel Sunset Canvas", artist: "GB5...Modern", category: "Modern", price: 310, image: "https://images.unsplash.com/photo-1578926375605-eaf7559b1458?w=800&q=80" },
+                        { title: "Kente Woven Dreams", artist: "GB6...Textile", category: "Textile", price: 195, image: "https://images.unsplash.com/photo-1528699144885-3652875b4783?w=800&q=80" },
+                        { title: "Baobab Spirit", artist: "GB7...Sculpture", category: "Sculpture", price: 375, image: "https://images.unsplash.com/photo-1559519529-0935f852b3a6?w=800&q=80" },
+                    ];
+                    const m = mocks[mockIdx];
+                    setListing({
+                        listing_id: Number(id),
+                        artist: m.artist,
+                        metadata_cid: `mock_cid_${id}`,
+                        price: BigInt(m.price) * BigInt(10_000_000),
+                        currency: "XLM",
+                        token: "CAS...XLM",
+                        recipients: [],
+                        status: "Active",
+                        owner: null,
+                        created_at: Math.floor(Date.now() / 1000),
+                        original_creator: m.artist,
+                        royalty_bps: 500,
+                    });
+                    setMetadata({
+                        title: m.title,
+                        description: `A stunning masterpiece representing the rich ${m.title.split(' ')[0]} culture. This unique artwork captures the essence of African heritage through modern digital expression.`,
+                        artist: m.artist,
+                        image: m.image,
+                        year: "2024",
+                        category: m.category,
+                    });
+                    setIsLoading(false);
+                    return;
+                }
+
                 // Try fetching as listing first
                 let l: Listing | null = null;
                 let a: Auction | null = null;
@@ -75,7 +114,6 @@ export default function ListingDetailPage() {
                     setListing(l);
                 } catch (e) {
                     // Might be an auction only or not found
-                    console.log("Not found as listing, checking auction...");
                 }
 
                 try {
@@ -83,11 +121,10 @@ export default function ListingDetailPage() {
                     setAuction(a);
                 } catch (e) {
                     // Might be a listing only
-                    console.log("Not found as auction.");
                 }
 
                 if (!l && !a) {
-                    throw new Error("Artwork not found on-chain");
+                    throw new Error("Artwork not found");
                 }
 
                 const cid = l?.metadata_cid || a?.metadata_cid;
@@ -95,15 +132,16 @@ export default function ListingDetailPage() {
                     const m = await fetchMetadata(cid);
                     setMetadata(m);
                 }
-            } catch (err: any) {
-                console.error("Error loading data:", err);
-                setError(err.message || "Failed to load artwork details");
-            } finally {
-                setIsLoading(false);
-            }
-        };
-        loadData();
+        } catch (err: unknown) {
+            setError(getReadableErrorMessage(err, "Failed to load artwork details"));
+        } finally {
+            setIsLoading(false);
+        }
     }, [id]);
+
+    useEffect(() => {
+        loadData();
+    }, [loadData]);
 
     const handleBuy = async () => {
         if (!listing) return;
@@ -143,6 +181,15 @@ export default function ListingDetailPage() {
                 </div>
                 <h2 className="text-2xl font-display font-bold text-white mb-2">Artwork Not Found</h2>
                 <p className="text-white/60 mb-8 max-w-md">{error ?? "The listing you are looking for does not exist or has been removed."}</p>
+                <button
+                    onClick={loadData}
+                    className="px-8 py-3 rounded-xl border border-white/10 text-white font-bold hover:bg-white/5 transition-all"
+                >
+                    <span className="inline-flex items-center gap-2">
+                        <RefreshCw size={16} />
+                        Retry
+                    </span>
+                </button>
                 <button
                     onClick={() => router.push('/')}
                     className="px-8 py-3 rounded-xl bg-brand-500 text-white font-bold hover:bg-brand-600 transition-all shadow-lg shadow-brand-500/20"
@@ -469,7 +516,7 @@ export default function ListingDetailPage() {
                                     </div>
                                 )}
 
-                                {status === "Sold" || status === "Finalized" && (
+                                {(status === "Sold" || status === "Finalized") && (
                                     <div className="p-6 rounded-2xl bg-white/5 border border-white/10 text-center">
                                         <p className="text-white/40 font-bold italic">
                                             This asset has been privateley collected.

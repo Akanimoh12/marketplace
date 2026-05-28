@@ -18,6 +18,13 @@ import {
 } from "@stellar/stellar-sdk";
 import { config } from "./config";
 import { signWithFreighter } from "./freighter";
+import { mapSorobanErrorMessage } from "./errors";
+import {
+  DEFAULT_TOKEN,
+  TokenConfig,
+  getNativeTokenConfig,
+  getTokenConfigByAddress,
+} from "@/config/tokens";
 
 // ── Types mirrored from the Rust contract ────────────────────
 
@@ -66,12 +73,21 @@ function getRpc(): SorobanRpc.Server {
   return new SorobanRpc.Server(config.rpcUrl, { allowHttp: false });
 }
 
-function getContract(): Contract {
-  return new Contract(config.contractId);
+export function getContract(contractId: string = config.contractId): Contract {
+  return new Contract(contractId);
 }
 
 function getNetworkPassphrase(): string {
   return config.networkPassphrase;
+}
+
+function resolveConfiguredToken(tokenAddress: string = DEFAULT_TOKEN.address): TokenConfig {
+  const token = getTokenConfigByAddress(tokenAddress);
+  if (!token) {
+    throw new Error(`Unsupported token address: ${tokenAddress}`);
+  }
+
+  return token;
 }
 
 // ── Invoke helper ─────────────────────────────────────────────
@@ -81,14 +97,20 @@ function getNetworkPassphrase(): string {
  * invocation transaction. Returns the simulation result for read-only
  * calls, or the ledger result for state-changing calls.
  */
-async function invokeContract(
+export async function invokeContract(
   callerPublicKey: string,
   method: string,
   args: xdr.ScVal[],
-  readonly = false
+  readonly = false,
+  contractId: string = config.contractId
 ): Promise<xdr.ScVal> {
+  const readableError = (raw: string, fallback: string): Error => {
+    const mapped = mapSorobanErrorMessage(raw);
+    return new Error(mapped ?? fallback);
+  };
+
   const rpc = getRpc();
-  const contract = getContract();
+  const contract = getContract(contractId);
 
   // Fetch the caller's account for the sequence number.
   const account = await rpc.getAccount(callerPublicKey);
@@ -105,7 +127,8 @@ async function invokeContract(
   const simResult = await rpc.simulateTransaction(tx);
 
   if (SorobanRpc.Api.isSimulationError(simResult)) {
-    throw new Error(`Simulation failed: ${simResult.error}`);
+    const raw = String(simResult.error ?? "");
+    throw readableError(raw, "Unable to simulate this transaction.");
   }
 
   if (readonly) {
@@ -129,7 +152,8 @@ async function invokeContract(
   );
 
   if (submitted.status === "ERROR") {
-    throw new Error(`Transaction submission failed: ${submitted.errorResult}`);
+    const raw = String(submitted.errorResult ?? "");
+    throw readableError(raw, "Transaction submission failed.");
   }
 
   // Poll for completion.
@@ -142,7 +166,8 @@ async function invokeContract(
   }
 
   if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-    throw new Error("Transaction failed on-chain.");
+    const raw = JSON.stringify(getResult);
+    throw readableError(raw, "Transaction failed on-chain. Please try again.");
   }
 
   const successResult =
@@ -206,11 +231,12 @@ export async function createListing(
   artistPublicKey: string,
   metadataCid: string,
   price: number,
-  tokenAddress: string = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", // Default to XLM
+  tokenAddress: string = DEFAULT_TOKEN.address,
   royaltyBps: number = 0,
   recipients: Array<{ address: string; percentage: number }> = []
 ): Promise<number> {
   const priceStroops = BigInt(Math.round(price * 10_000_000));
+  const selectedToken = resolveConfiguredToken(tokenAddress);
 
   // If no recipients provided, default to 100% to the artist
   const finalRecipients = recipients.length > 0 
@@ -221,8 +247,8 @@ export async function createListing(
     new Address(artistPublicKey).toScVal(),
     nativeToScVal(Buffer.from(metadataCid, "utf-8"), { type: "bytes" }),
     nativeToScVal(priceStroops, { type: "i128" }),
-    nativeToScVal("XLM", { type: "symbol" }),
-    new Address(tokenAddress).toScVal(),
+    nativeToScVal(selectedToken.symbol, { type: "symbol" }),
+    new Address(selectedToken.address).toScVal(),
     nativeToScVal(royaltyBps, { type: "u32" }),
     nativeToScVal(finalRecipients.map(r => ({
         address: new Address(r.address),
@@ -278,13 +304,14 @@ export async function updateListing(
   newRecipients: Array<{ address: string; percentage: number }> = []
 ): Promise<boolean> {
   const priceStroops = BigInt(Math.round(newPrice * 10_000_000));
+  const selectedToken = resolveConfiguredToken(newTokenAddress);
 
   const args: xdr.ScVal[] = [
     new Address(artistPublicKey).toScVal(),
     nativeToScVal(BigInt(listingId), { type: "u64" }),
     nativeToScVal(Buffer.from(newMetadataCid, "utf-8"), { type: "bytes" }),
     nativeToScVal(priceStroops, { type: "i128" }),
-    new Address(newTokenAddress).toScVal(),
+    new Address(selectedToken.address).toScVal(),
     nativeToScVal(newRecipients.map(r => ({
         address: new Address(r.address),
         percentage: r.percentage
@@ -446,25 +473,28 @@ export async function createAuction(
   creatorPublicKey: string,
   metadataCid: string,
   reservePriceXlm: number,
-  durationSeconds: number
+  durationSeconds: number,
+  royaltyBps: number = 0,
+  recipients: Array<{ address: string; percentage: number }> = []
 ): Promise<number> {
   const reserveStroops = BigInt(Math.round(reservePriceXlm * 10_000_000));
+  const nativeToken = getNativeTokenConfig();
+
+  const finalRecipients = recipients.length > 0
+    ? recipients
+    : [{ address: creatorPublicKey, percentage: 100 }];
 
   const args: xdr.ScVal[] = [
-    // creator: Address
     new Address(creatorPublicKey).toScVal(),
-    // metadata_cid: Bytes
     nativeToScVal(Buffer.from(metadataCid, "utf-8"), { type: "bytes" }),
-    // token: Address (native XLM contract)
-    new Address("CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC").toScVal(),
-    // reserve_price: i128
+    new Address(nativeToken.address).toScVal(),
     nativeToScVal(reserveStroops, { type: "i128" }),
-    // duration: u64
     nativeToScVal(BigInt(durationSeconds), { type: "u64" }),
-    // royalty_bps: u32
-    nativeToScVal(0, { type: "u32" }),
-    // recipients: Vec<Recipient> (empty for MVP)
-    nativeToScVal([], { type: "vec" }),
+    nativeToScVal(royaltyBps, { type: "u32" }),
+    nativeToScVal(finalRecipients.map(r => ({
+        address: new Address(r.address),
+        percentage: r.percentage
+    })), { type: "vec" }),
   ];
 
   const retVal = await invokeContract(
@@ -660,6 +690,20 @@ export async function removeTokenFromWhitelist(
 
   await invokeContract(adminPublicKey, "remove_token_from_whitelist", args);
   return true;
+}
+
+/**
+ * get_token_whitelist — Fetch all whitelisted tokens.
+ */
+export async function getTokenWhitelist(): Promise<string[]> {
+  const DUMMY_KEY = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
+  try {
+    const retVal = await invokeContract(DUMMY_KEY, "get_token_whitelist", [], true);
+    const native = scValToNative(retVal) as Address[];
+    return native.map(a => a.toString());
+  } catch {
+    return [];
+  }
 }
 
 /**
